@@ -9,3 +9,7 @@ rppl:
 repl:
 	go build -o dist/repl cmd/repl/main.go
 	./dist/repl
+
+vm-repl:
+	go build -o dist/vm-repl cmd/vm-repl/main.go
+	./dist/vm-repl
