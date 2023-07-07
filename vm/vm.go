@@ -9,31 +9,56 @@ import (
 
 const StackSize = 2048
 const GlobalsSize = 65536
+const MaxFrames = 1024
 
 var True = &object.Boolean{Value: true}
 var False = &object.Boolean{Value: false}
 var Null = &object.Null{}
 
+// 将主调用也视为一次函数调用，这样就统一了
+// 所以栈虚拟机不是指函数调用栈，而是指操作对象，但是函数调用碰巧也是一个栈
 type VM struct {
-	constants    []object.Object
-	instructions code.Instructions
+	constants []object.Object
+	globals   []object.Object
 
 	stack []object.Object
-	sp    int // 始终指向栈顶的下一个空槽
+	sp    int
 
-	globals []object.Object
+	frames      []*Frame
+	framesIndex int // 注意这里的使用和 scopeIndex 用了不同的习惯，指向了 next
 }
 
 func NewVM(bytecode *compiler.Bytecode) *VM {
+	mainFn := &object.CompiledFunction{Instructions: bytecode.Instructions}
+	mainFrame := NewFrame(mainFn, 0)
+
+	frames := make([]*Frame, MaxFrames)
+	frames[0] = mainFrame
+
 	return &VM{
-		instructions: bytecode.Instructions,
-		constants:    bytecode.Constants,
+		constants: bytecode.Constants,
+		globals:   make([]object.Object, GlobalsSize),
 
 		stack: make([]object.Object, StackSize),
 		sp:    0,
 
-		globals: make([]object.Object, GlobalsSize),
+		frames:      frames,
+		framesIndex: 1,
 	}
+}
+
+func (vm *VM) currentFrame() *Frame {
+	return vm.frames[vm.framesIndex-1]
+}
+
+func (vm *VM) pushFrame(f *Frame) {
+	vm.frames[vm.framesIndex] = f
+	vm.framesIndex++
+}
+
+func (vm *VM) popFrame() *Frame {
+	vm.framesIndex--
+	return vm.frames[vm.framesIndex]
 }
 
 func NewVMWithGlobalsStore(bytecode *compiler.Bytecode, s []object.Object) *VM {
@@ -50,13 +75,18 @@ func (vm *VM) StackTop() object.Object {
 }
 
 func (vm *VM) Run() error {
-	for ip := 0; ip < len(vm.instructions); ip++ {
-		op := code.Opcode(vm.instructions[ip])
+	for vm.currentFrame().ip+1 < len(vm.currentFrame().Instructions()) {
+		// 为了处理 frame 新载入的时候的 ip 匹配问题，初始化 -1，入口处 ++
+		// TODO: 放到每个指令内处理
+		vm.currentFrame().ip++
+
+		ins := vm.currentFrame().Instructions()
+		op := code.Opcode(ins[vm.currentFrame().ip])
 
 		switch op {
 		case code.OpConstant:
-			constIndex := code.ReadUint16(vm.instructions[ip+1:])
-			ip += 2
+			constIndex := code.ReadUint16(ins[vm.currentFrame().ip+1:])
+			vm.currentFrame().ip += 2
 			err := vm.push(vm.constants[constIndex])
 			if err != nil {
 				return err
@@ -94,14 +124,14 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpJump:
-			pos := int(code.ReadUint16(vm.instructions[ip+1:]))
-			ip = pos - 1 // 这里的 -1 是为了抵消循环中的 ip++
+			pos := int(code.ReadUint16(ins[vm.currentFrame().ip+1:]))
+			vm.currentFrame().ip = pos - 1 // 这里的 -1 是为了抵消循环中的 ip++
 		case code.OpJumpNotTruthy:
-			pos := int(code.ReadUint16(vm.instructions[ip+1:]))
-			ip += 2
+			pos := int(code.ReadUint16(ins[vm.currentFrame().ip+1:]))
+			vm.currentFrame().ip += 2
 			condition := vm.pop()
 			if !isTruthy(condition) {
-				ip = pos - 1
+				vm.currentFrame().ip = pos - 1
 			}
 		case code.OpNull:
 			err := vm.push(Null)
@@ -109,19 +139,19 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpSetGlobal:
-			globalIndex := code.ReadUint16(vm.instructions[ip+1:])
-			ip += 2
+			globalIndex := code.ReadUint16(ins[vm.currentFrame().ip+1:])
+			vm.currentFrame().ip += 2
 			vm.globals[globalIndex] = vm.pop()
 		case code.OpGetGlobal:
-			globalIndex := code.ReadUint16(vm.instructions[ip+1:])
-			ip += 2
+			globalIndex := code.ReadUint16(ins[vm.currentFrame().ip+1:])
+			vm.currentFrame().ip += 2
 			err := vm.push(vm.globals[globalIndex])
 			if err != nil {
 				return err
 			}
 		case code.OpArray:
-			numElements := int(code.ReadUint16(vm.instructions[ip+1:]))
-			ip += 2
+			numElements := int(code.ReadUint16(ins[vm.currentFrame().ip+1:]))
+			vm.currentFrame().ip += 2
 
 			// 这里直接操作了栈，比逐个 pop 性能会更好
 			array := vm.buildArray(vm.sp-numElements, vm.sp)
@@ -132,8 +162,8 @@ func (vm *VM) Run() error {
 				return err
 			}
 		case code.OpHash:
-			numElements := int(code.ReadUint16(vm.instructions[ip+1:]))
-			ip += 2
+			numElements := int(code.ReadUint16(ins[vm.currentFrame().ip+1:]))
+			vm.currentFrame().ip += 2
 
 			hash, err := vm.buildHash(vm.sp-numElements, vm.sp)
 			if err != nil {
@@ -150,6 +180,46 @@ func (vm *VM) Run() error {
 			left := vm.pop()
 
 			err := vm.executeIndexExpression(left, index)
+			if err != nil {
+				return err
+			}
+		case code.OpCall:
+			fn, ok := vm.stack[vm.sp-1].(*object.CompiledFunction)
+			if !ok {
+				return fmt.Errorf("calling non-function")
+			}
+			frame := NewFrame(fn, vm.sp)
+			vm.pushFrame(frame)
+			// 预留本地变量的栈空间
+			vm.sp = frame.basePointer + fn.NumLocals
+		case code.OpReturnValue:
+			returnValue := vm.pop()
+			frame := vm.popFrame()
+			vm.sp = frame.basePointer - 1
+
+			err := vm.push(returnValue)
+			if err != nil {
+				return err
+			}
+		case code.OpReturn:
+			frame := vm.popFrame()
+			vm.sp = frame.basePointer - 1
+
+			err := vm.push(Null)
+			if err != nil {
+				return err
+			}
+
+		case code.OpSetLocal:
+			localIndex := code.ReadUint8(ins[vm.currentFrame().ip+1:])
+			vm.currentFrame().ip += 1
+			frame := vm.currentFrame()
+			vm.stack[frame.basePointer+int(localIndex)] = vm.pop()
+		case code.OpGetLocal:
+			localIndex := code.ReadUint8(ins[vm.currentFrame().ip+1:])
+			vm.currentFrame().ip += 1
+			frame := vm.currentFrame()
+			err := vm.push(vm.stack[frame.basePointer+int(localIndex)])
 			if err != nil {
 				return err
 			}

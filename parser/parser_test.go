@@ -646,6 +646,53 @@ func TestFunctionLiteralParsing(t *testing.T) {
 	testInfixExpression(t, bodyStmt.Expression, "x", "+", "y")
 }
 
+func TestFunctionLiteralParsing2(t *testing.T) {
+	input := `fn(x, y) { return x + y }`
+
+	l := lexer.NewLexer(input)
+	p := NewParser(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	if len(program.Statements) != 1 {
+		t.Fatalf("program.Statements does not contain %d statements. got=%d\n",
+			1, len(program.Statements))
+	}
+
+	stmt, ok := program.Statements[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not ast.ExpressionStatement. got=%T",
+			program.Statements[0])
+	}
+
+	function, ok := stmt.Expression.(*ast.FunctionLiteral)
+	if !ok {
+		t.Fatalf("stmt.Expression is not ast.FunctionLiteral. got=%T",
+			stmt.Expression)
+	}
+
+	if len(function.Parameters) != 2 {
+		t.Fatalf("function literal parameters wrong. want 2, got=%d\n",
+			len(function.Parameters))
+	}
+
+	testLiteralExpression(t, function.Parameters[0], "x")
+	testLiteralExpression(t, function.Parameters[1], "y")
+
+	if len(function.Body.Statements) != 1 {
+		t.Fatalf("function.Body.Statements has not 1 statements. got=%d\n",
+			len(function.Body.Statements))
+	}
+
+	bodyStmt, ok := function.Body.Statements[0].(*ast.ReturnStatement)
+	if !ok {
+		t.Fatalf("function body stmt is not ast.ReturnStatement. got=%T",
+			function.Body.Statements[0])
+	}
+
+	testInfixExpression(t, bodyStmt.Value, "x", "+", "y")
+}
+
 func TestFunctionParameterParsing(t *testing.T) {
 	tests := []struct {
 		input          string
@@ -926,4 +973,69 @@ func TestMacroLiteralParsing(t *testing.T) {
 	}
 
 	testInfixExpression(t, bodyStmt.Expression, "x", "+", "y")
+}
+
+func TestStatements(t *testing.T) {
+	input := `
+		let globalSeed = 50;
+		let minusOne = fn() {
+				let num = 1;
+				globalSeed - num;
+		}
+		let minusTwo = fn() {
+				let num = 2;
+				globalSeed - num;
+		}
+		minusOne() + minusTwo();
+	`
+
+	l := lexer.NewLexer(input)
+	p := NewParser(l)
+	program := p.ParseProgram()
+	checkParserErrors(t, p)
+
+	if len(program.Statements) != 4 {
+		t.Fatalf("program.Statements does not contain %d statements. got=%d\n",
+			4, len(program.Statements))
+	}
+
+	stmt0, ok := program.Statements[0].(*ast.LetStatement)
+	if !ok {
+		t.Fatalf("program.Statements[0] is not ast.LetStatement. got=%T",
+			program.Statements[0])
+	}
+
+	if stmt0 == nil {
+		t.Fatal("program.Statements[0] is nil")
+	}
+
+	stmt1, ok := program.Statements[1].(*ast.LetStatement)
+	if !ok {
+		t.Fatalf("program.Statements[1] is not ast.LetStatement. got=%T",
+			program.Statements[1])
+	}
+
+	if stmt1 == nil {
+		t.Fatal("program.Statements[1] is nil")
+	}
+
+	stmt2, ok := program.Statements[2].(*ast.LetStatement)
+	if !ok {
+		t.Fatalf("program.Statements[2] is not ast.LetStatement. got=%T",
+			program.Statements[2])
+	}
+
+	if stmt2 == nil {
+		t.Fatal("program.Statements[2] is nil")
+	}
+
+	stmt3, ok := program.Statements[3].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("program.Statements[3] is not ast.ExpressionStatement. got=%T",
+			program.Statements[3])
+	}
+
+	if stmt3 == nil {
+		t.Fatal("program.Statements[3] is nil")
+	}
 }
